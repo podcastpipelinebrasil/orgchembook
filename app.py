@@ -399,11 +399,53 @@ def build_pdf(meta, res, df):
     return bytes(pdf.output())
 
 
-def build_docx(meta, res, df):
-    """Generate an editable Word (.docx) report. Returns bytes or None if python-docx missing."""
+def build_docx_flow(meta, res):
+    """Editable Word (.docx) report for FLOW mode. Returns bytes or None if python-docx missing."""
     try:
         from docx import Document
-        from docx.shared import Pt, RGBColor
+    except ImportError:
+        return None
+
+    doc = Document()
+    doc.add_heading("OrgChemBook — Flow Reaction Report", level=0)
+
+    for k, v in meta.items():
+        if v:
+            p = doc.add_paragraph()
+            p.add_run(f"{k}: ").bold = True
+            p.add_run(str(v))
+
+    # Pumps table
+    doc.add_heading("Flow setup — pumps", level=1)
+    cols = ["Pump", "Role", "Compound", "CAS", "MW", "mmol", "Limiting"]
+    pt = doc.add_table(rows=1, cols=len(cols))
+    pt.style = "Light Grid Accent 1"
+    for j, c in enumerate(cols):
+        pt.rows[0].cells[j].paragraphs[0].add_run(c).bold = True
+    for i, p in enumerate(res["pumps"]):
+        name = p.enzyme_name if (p.role == "catalyst" and p.cat_type == "biological") else p.name
+        vals = [f"P{str(i+1).zfill(2)}", p.role, name or "—", p.cas or "—",
+                str(p.mw or "—"), str(p.mmol or "—"), "★" if p.is_limiting else ""]
+        cells = pt.add_row().cells
+        for j, v in enumerate(vals):
+            cells[j].text = v
+
+    # Product
+    fp = res["flow_product"]
+    doc.add_heading("Product", level=1)
+    doc.add_paragraph(f"Name: {fp.name or '—'} · Formula: {fp.formula or '—'} · MW: {fp.mw or '—'}")
+    if res.get("exp_yield"):
+        doc.add_paragraph(f"Experimental yield: {res['exp_yield']} g")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def build_docx(meta, res, df):
+    """Editable Word (.docx) report for BATCH mode. Returns bytes or None if python-docx missing."""
+    try:
+        from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
     except ImportError:
         return None
@@ -463,6 +505,63 @@ def build_docx(meta, res, df):
         for j, col in enumerate(df.columns):
             val = row[col]
             cells[j].text = "" if pd.isna(val) else str(val)
+
+    # Biocatalyst table
+    biocats = res.get("biocats") or []
+    if biocats:
+        doc.add_heading("Biocatalyst summary", level=1)
+        lm = res["limiting"].mmol
+        bcols = ["Enzyme", "EC", "Form", "Amount", "Loading (mg/mmol)", "Total (U)"]
+        bt = doc.add_table(rows=1, cols=len(bcols))
+        bt.style = "Light Grid Accent 1"
+        for j, c in enumerate(bcols):
+            bt.rows[0].cells[j].paragraphs[0].add_run(c).bold = True
+        for x in biocats:
+            amt = x.enzyme_amount
+            loading = round(amt * 1000 / lm, 1) if (amt and lm) else "—"
+            total_u = round(amt * 1000 * x.enzyme_activity, 0) if (amt and x.enzyme_activity) else "—"
+            unit = "mL" if x.enzyme_form == "liquid" else "g"
+            vals = [x.enzyme_name or "—", x.enzyme_code or "—", x.enzyme_form,
+                    f"{amt} {unit}" if amt else "—", str(loading), str(total_u)]
+            cells = bt.add_row().cells
+            for j, v in enumerate(vals):
+                cells[j].text = v
+
+    # Reaction conditions
+    cond = res.get("cond")
+    if cond:
+        doc.add_heading("Reaction conditions", level=1)
+        cond_lines = [
+            ("Reactor", cond.get("reactor")),
+            ("Agitation", cond.get("agitation")),
+            ("Time (min)", cond.get("time")),
+            ("Temperature (°C)", cond.get("temperature")),
+            ("Photochemical", "Yes" if cond.get("photochemical") else "No"),
+            ("Ultrasound", "Yes" if cond.get("ultrasound") else "No"),
+        ]
+        for label, val in cond_lines:
+            if val not in (None, "", 0):
+                p = doc.add_paragraph()
+                p.add_run(f"{label}: ").bold = True
+                p.add_run(str(val))
+        if cond.get("procedure"):
+            p = doc.add_paragraph()
+            p.add_run("Procedure notes: ").bold = True
+            p.add_run(cond["procedure"])
+
+    # Work-up
+    workup = [w for w in st.session_state.workup if w.get("name") or w.get("amount")]
+    if workup:
+        doc.add_heading("Work-up", level=1)
+        wt = doc.add_table(rows=1, cols=3)
+        wt.style = "Light Grid Accent 1"
+        for j, c in enumerate(["Material", "Amount", "Unit"]):
+            wt.rows[0].cells[j].paragraphs[0].add_run(c).bold = True
+        for w in workup:
+            cells = wt.add_row().cells
+            cells[0].text = w.get("name") or "—"
+            cells[1].text = str(w.get("amount") or "—")
+            cells[2].text = w.get("unit", "")
 
     # Method notes
     doc.add_heading("Notes", level=1)
@@ -588,20 +687,33 @@ with tab_setup:
                         if data.get("error"):
                             st.warning(f"Lookup failed: {data['error']}")
                         else:
+                            # Write into the object AND into the widget keys, then rerun,
+                            # so the inputs reflect the fetched values on redraw.
                             if data.get("formula"):
                                 r.formula = data["formula"]
+                                st.session_state[f"form_{real_idx}"] = data["formula"]
                             if data.get("mw"):
                                 r.mw = data["mw"]
+                                st.session_state[f"mw_{real_idx}"] = float(data["mw"])
                             if data.get("density"):
                                 r.density = data["density"]
+                                st.session_state[f"dens_{real_idx}"] = float(data["density"])
                             if data.get("smiles"):
                                 r.smiles = data["smiles"]
-                            st.success(f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
+                                st.session_state[f"smi_{real_idx}"] = data["smiles"]
+                            st.session_state[f"_lookup_ok_{real_idx}"] = (
+                                f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
+                            st.rerun()
+
+                    # show success message that survived the rerun
+                    if st.session_state.get(f"_lookup_ok_{real_idx}"):
+                        st.success(st.session_state.pop(f"_lookup_ok_{real_idx}"))
 
                     c2 = st.columns(2)
                     r.formula = c2[0].text_input("Molecular formula", r.formula, key=f"form_{real_idx}")
                     parsed = parse_mw(r.formula)
-                    mw_val = st.number_input("MW (g/mol)", value=float(r.mw) if r.mw else (parsed or 0.0),
+                    mw_default = float(r.mw) if r.mw else (parsed or 0.0)
+                    mw_val = st.number_input("MW (g/mol)", value=mw_default,
                                              min_value=0.0, key=f"mw_{real_idx}")
                     r.mw = mw_val or parsed or None
                     r.smiles = c2[1].text_input("SMILES", r.smiles, key=f"smi_{real_idx}")
@@ -701,10 +813,22 @@ with tab_setup:
                         if data.get("error"):
                             st.warning(f"Lookup failed: {data['error']}")
                         else:
-                            p.formula = data.get("formula") or p.formula
-                            p.mw = data.get("mw") or p.mw
-                            p.density = data.get("density") or p.density
-                            st.success(f"✔ {data.get('formula')} · MW {data.get('mw')}")
+                            if data.get("formula"):
+                                p.formula = data["formula"]
+                                st.session_state[f"pform_{idx}"] = data["formula"]
+                            if data.get("mw"):
+                                p.mw = data["mw"]
+                                st.session_state[f"pmw_{idx}"] = float(data["mw"])
+                            if data.get("density"):
+                                p.density = data["density"]
+                                st.session_state[f"pdens_{idx}"] = float(data["density"])
+                            st.session_state[f"_plookup_ok_{idx}"] = (
+                                f"✔ {data.get('formula')} · MW {data.get('mw')}")
+                            st.rerun()
+
+                    if st.session_state.get(f"_plookup_ok_{idx}"):
+                        st.success(st.session_state.pop(f"_plookup_ok_{idx}"))
+
                     c2 = st.columns(2)
                     p.formula = c2[0].text_input("Formula", p.formula, key=f"pform_{idx}")
                     parsed = parse_mw(p.formula)
@@ -849,19 +973,29 @@ with tab_results:
         st.divider()
         st.subheader("Export")
         df = build_summary_df(st.session_state.reagents)
-        e = st.columns(3)
+        e = st.columns(4)
         e[0].download_button("⬇️ CSV", df.to_csv(index=False).encode(),
                              "reaction_summary.csv", "text/csv", use_container_width=True)
         payload = {"meta": res["meta"], "metrics": {
             k: res[k] for k in ("ae", "ef", "ef_wu", "pmi", "pmi_wu", "ef_plus", "ty", "py")}}
         e[1].download_button("⬇️ JSON", json.dumps(payload, indent=2, default=str).encode(),
                              "reaction_report.json", "application/json", use_container_width=True)
+
+        docx_bytes = build_docx(res["meta"], res, df)
+        if docx_bytes:
+            e[2].download_button(
+                "⬇️ Word", docx_bytes, "reaction_report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True)
+        else:
+            e[2].caption("Word export needs `python-docx`.")
+
         pdf_bytes = build_pdf(res["meta"], res, df)
         if pdf_bytes:
-            e[2].download_button("⬇️ PDF", pdf_bytes, "reaction_report.pdf",
+            e[3].download_button("⬇️ PDF", pdf_bytes, "reaction_report.pdf",
                                  "application/pdf", use_container_width=True)
         else:
-            e[2].caption("PDF export needs `fpdf2` installed.")
+            e[3].caption("PDF export needs `fpdf2`.")
 
     else:  # flow
         st.subheader("Flow setup — pumps")
@@ -880,6 +1014,22 @@ with tab_results:
         if res.get("exp_yield"):
             st.metric("Experimental yield", f"{res['exp_yield']} g")
         st.divider()
+        st.subheader("Export")
         df = build_summary_df(res["pumps"] + [fp])
-        st.download_button("⬇️ CSV", df.to_csv(index=False).encode(),
-                           "flow_summary.csv", "text/csv")
+        e = st.columns(4)
+        e[0].download_button("⬇️ CSV", df.to_csv(index=False).encode(),
+                             "flow_summary.csv", "text/csv", use_container_width=True)
+        payload = {"meta": res["meta"], "exp_yield": res.get("exp_yield"),
+                   "pumps": [asdict(p) for p in res["pumps"]],
+                   "product": asdict(fp)}
+        e[1].download_button("⬇️ JSON", json.dumps(payload, indent=2, default=str).encode(),
+                             "flow_report.json", "application/json", use_container_width=True)
+        docx_bytes = build_docx_flow(res["meta"], res)
+        if docx_bytes:
+            e[2].download_button(
+                "⬇️ Word", docx_bytes, "flow_report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True)
+        else:
+            e[2].caption("Word export needs `python-docx`.")
+        e[3].caption("PDF: use Word → Save as PDF.")
