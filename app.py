@@ -242,6 +242,50 @@ def pubchem_image_url(cid: int, size: int = 200) -> str:
     return f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/PNG?image_size={size}x{size}"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Streamlit callbacks — run BEFORE the script re-executes, so they can freely
+# write to widget keys (this is the reliable way to populate fields).
+# ─────────────────────────────────────────────────────────────────────────────
+def cb_lookup(uid, k_name, k_cas, k_form, k_mw, k_dens, k_smi, k_cid):
+    """Fetch from PubChem and write results directly into the widget keys."""
+    query = (st.session_state.get(k_cas) or st.session_state.get(k_name) or "").strip()
+    if not query:
+        return
+    data = pubchem_lookup(query)
+    if data.get("error"):
+        st.session_state[f"_msg_{uid}"] = ("error", data["error"])
+        return
+    if data.get("name"):
+        st.session_state[k_name] = data["name"]
+    if data.get("formula"):
+        st.session_state[k_form] = data["formula"]
+    if data.get("mw"):
+        st.session_state[k_mw] = float(data["mw"])
+    if k_dens and data.get("density"):
+        st.session_state[k_dens] = float(data["density"])
+    if k_smi and data.get("smiles"):
+        st.session_state[k_smi] = data["smiles"]
+    st.session_state[k_cid] = data.get("cid")
+    st.session_state[f"_msg_{uid}"] = (
+        "ok", f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
+
+
+def cb_relink(uid, changed):
+    """Recompute linked quantities (mass<->volume<->mmol) and write back to keys."""
+    mw = st.session_state.get(f"mw_{uid}")
+    if not mw:
+        return
+    mass = st.session_state.get(f"mass_{uid}") or None
+    vol = st.session_state.get(f"vol_{uid}") or None
+    mmol = st.session_state.get(f"mmol_{uid}") or None
+    dens = st.session_state.get(f"dens_{uid}") or None
+    pur = st.session_state.get(f"pur_{uid}", 100.0)
+    lm, lv, lmol = link_quantities(mw, mass, vol, mmol, dens, pur, changed)
+    st.session_state[f"mass_{uid}"] = float(lm) if lm else 0.0
+    st.session_state[f"vol_{uid}"] = float(lv) if lv else 0.0
+    st.session_state[f"mmol_{uid}"] = float(lmol) if lmol else 0.0
+
+
 def _pubchem_density(cid: int) -> Optional[float]:
     """Try to extract a numeric density (g/mL) from the PubChem PUG-View record."""
     try:
@@ -679,38 +723,6 @@ with tab_setup:
             real_idx = st.session_state.reagents.index(r)
             uid = r.uid
             color = ROLE_COLORS[r.role]
-
-            # Apply any pending lookup result BEFORE widgets are drawn. Writing to a
-            # widget key here (before the widget exists this run) is allowed and makes
-            # the widget adopt the value on creation.
-            pend_key = f"_pending_lookup_{uid}"
-            if st.session_state.get(pend_key):
-                d = st.session_state.pop(pend_key)
-                if d.get("name"):
-                    r.name = d["name"]
-                    st.session_state[f"name_{uid}"] = d["name"]
-                if d.get("formula"):
-                    r.formula = d["formula"]
-                    st.session_state[f"form_{uid}"] = d["formula"]
-                if d.get("mw"):
-                    r.mw = float(d["mw"])
-                    st.session_state[f"mw_{uid}"] = float(d["mw"])
-                if d.get("density"):
-                    r.density = float(d["density"])
-                    st.session_state[f"dens_{uid}"] = float(d["density"])
-                if d.get("smiles"):
-                    r.smiles = d["smiles"]
-                    st.session_state[f"smi_{uid}"] = d["smiles"]
-                r.cid = d.get("cid")
-
-            # Apply any pending quantity relink (mass<->volume<->mmol) before widgets.
-            pend_q = f"_pending_qty_{uid}"
-            if st.session_state.get(pend_q):
-                q = st.session_state.pop(pend_q)
-                r.mass, r.volume, r.mmol = q["mass"], q["volume"], q["mmol"]
-                st.session_state[f"mass_{uid}"] = float(q["mass"]) if q["mass"] else 0.0
-                st.session_state[f"vol_{uid}"] = float(q["volume"]) if q["volume"] else 0.0
-                st.session_state[f"mmol_{uid}"] = float(q["mmol"]) if q["mmol"] else 0.0
 
             with st.container(border=True):
                 head = st.columns([2, 3, 1])
