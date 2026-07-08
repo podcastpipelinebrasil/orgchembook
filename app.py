@@ -248,50 +248,48 @@ def pubchem_image_url(cid: int, size: int = 200) -> str:
 # `value=`, and let session_state be the single source of truth. Callbacks then
 # write straight into these keys.
 # ─────────────────────────────────────────────────────────────────────────────
-def seed(key, val):
-    """Initialise a widget key exactly once (before the widget is created)."""
-    if key not in st.session_state:
-        st.session_state[key] = val
-
-
-def cb_lookup(uid, k_name, k_cas, k_form, k_mw, k_dens, k_smi, k_cid):
-    """Fetch from PubChem and write results directly into the widget keys."""
-    query = (st.session_state.get(k_cas) or st.session_state.get(k_name) or "").strip()
+def cb_lookup(uid, r_ref):
+    """Fetch from PubChem and store the result on the compound object itself.
+    A version counter is bumped so the widgets get brand-new keys and re-read value=."""
+    query = (st.session_state.get(f"cas_{uid}_{st.session_state.get(f'_ver_{uid}',0)}")
+             or st.session_state.get(f"name_{uid}_{st.session_state.get(f'_ver_{uid}',0)}")
+             or "").strip()
     if not query:
         return
     data = pubchem_lookup(query)
     if data.get("error"):
         st.session_state[f"_msg_{uid}"] = ("error", data["error"])
         return
-    if data.get("name"):
-        st.session_state[k_name] = data["name"]
-    if data.get("formula"):
-        st.session_state[k_form] = data["formula"]
-    if data.get("mw"):
-        st.session_state[k_mw] = float(data["mw"])
-    if k_dens and data.get("density"):
-        st.session_state[k_dens] = float(data["density"])
-    if k_smi and data.get("smiles"):
-        st.session_state[k_smi] = data["smiles"]
-    st.session_state[k_cid] = data.get("cid")
+    r_ref["name"] = data.get("name") or r_ref.get("name", "")
+    r_ref["formula"] = data.get("formula") or r_ref.get("formula", "")
+    r_ref["mw"] = float(data["mw"]) if data.get("mw") else r_ref.get("mw")
+    r_ref["density"] = float(data["density"]) if data.get("density") else r_ref.get("density")
+    r_ref["smiles"] = data.get("smiles") or r_ref.get("smiles", "")
+    r_ref["cid"] = data.get("cid")
+    # bump version -> widgets get new keys -> they adopt the new value= on next render
+    st.session_state[f"_ver_{uid}"] = st.session_state.get(f"_ver_{uid}", 0) + 1
     st.session_state[f"_msg_{uid}"] = (
         "ok", f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
 
 
 def cb_relink(uid, changed):
-    """Recompute linked quantities (mass<->volume<->mmol) and write back to keys."""
-    mw = st.session_state.get(f"mw_{uid}")
+    """Recompute linked quantities and bump version so quantity widgets refresh."""
+    ver = st.session_state.get(f"_ver_{uid}", 0)
+    mw = st.session_state.get(f"mw_{uid}_{ver}")
     if not mw:
         return
-    mass = st.session_state.get(f"mass_{uid}") or None
-    vol = st.session_state.get(f"vol_{uid}") or None
-    mmol = st.session_state.get(f"mmol_{uid}") or None
-    dens = st.session_state.get(f"dens_{uid}") or None
-    pur = st.session_state.get(f"pur_{uid}", 100.0)
+    mass = st.session_state.get(f"mass_{uid}_{ver}") or None
+    vol = st.session_state.get(f"vol_{uid}_{ver}") or None
+    mmol = st.session_state.get(f"mmol_{uid}_{ver}") or None
+    dens = st.session_state.get(f"dens_{uid}_{ver}") or None
+    pur = st.session_state.get(f"pur_{uid}_{ver}", 100.0)
     lm, lv, lmol = link_quantities(mw, mass, vol, mmol, dens, pur, changed)
-    st.session_state[f"mass_{uid}"] = float(lm) if lm else 0.0
-    st.session_state[f"vol_{uid}"] = float(lv) if lv else 0.0
-    st.session_state[f"mmol_{uid}"] = float(lmol) if lmol else 0.0
+    st.session_state[f"_qty_{uid}"] = {
+        "mass": float(lm) if lm else 0.0,
+        "vol": float(lv) if lv else 0.0,
+        "mmol": float(lmol) if lmol else 0.0,
+    }
+    st.session_state[f"_ver_{uid}"] = ver + 1
 
 
 def _pubchem_density(cid: int) -> Optional[float]:
@@ -663,7 +661,7 @@ st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 # ── Session state init ───────────────────────────────────────────────────────
 # Bump this when the Compound dataclass gains new fields, to flush stale objects
 # left in session_state from an older version of the app.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 if st.session_state.get("_schema") != SCHEMA_VERSION:
     st.session_state.clear()
     st.session_state["_schema"] = SCHEMA_VERSION
