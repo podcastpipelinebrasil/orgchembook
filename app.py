@@ -32,7 +32,6 @@ Notes
 import io
 import json
 import math
-import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -185,7 +184,7 @@ PUGREST = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 
 @st.cache_data(show_spinner=False, ttl=86400)
 def pubchem_lookup(query: str) -> dict:
-    """Look up a compound by CAS or name. Returns {name, formula, mw, density, smiles, cid, error?}."""
+    """Look up a compound by CAS or name. Returns {formula, mw, density, cid, iupac, error?}."""
     query = query.strip()
     if not query:
         return {"error": "empty query"}
@@ -205,10 +204,8 @@ def pubchem_lookup(query: str) -> dict:
         pdata = p.json()["PropertyTable"]["Properties"][0]
 
         density = _pubchem_density(cid)
-        common = _pubchem_common_name(cid)
         return {
             "cid": cid,
-            "name": common or pdata.get("IUPACName") or query,
             "formula": pdata.get("MolecularFormula"),
             "mw": float(pdata["MolecularWeight"]) if pdata.get("MolecularWeight") else None,
             "smiles": pdata.get("CanonicalSMILES"),
@@ -219,77 +216,6 @@ def pubchem_lookup(query: str) -> dict:
         return {"error": f"Network error: {e}"}
     except (KeyError, ValueError, IndexError) as e:
         return {"error": f"Parse error: {e}"}
-
-
-def _pubchem_common_name(cid: int) -> Optional[str]:
-    """Fetch the preferred common/synonym name for a CID (first synonym is usually the common name)."""
-    try:
-        r = requests.get(f"{PUGREST}/compound/cid/{cid}/synonyms/JSON", timeout=12)
-        if r.status_code != 200:
-            return None
-        syns = r.json()["InformationList"]["Information"][0].get("Synonym", [])
-        # PubChem lists the most common name first; skip pure CAS-number entries
-        for s in syns:
-            if not s.replace("-", "").isdigit():  # skip CAS-like "67-64-1"
-                return s
-        return syns[0] if syns else None
-    except (requests.RequestException, KeyError, IndexError):
-        return None
-
-
-def pubchem_image_url(cid: int, size: int = 200) -> str:
-    """Return a PubChem 2D structure image URL for a given CID."""
-    return f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/PNG?image_size={size}x{size}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Streamlit key helpers — Streamlit >=1.50 ignores `value=` on widgets that have
-# a key after first render. The reliable pattern is: seed the key ONCE, never pass
-# `value=`, and let session_state be the single source of truth. Callbacks then
-# write straight into these keys.
-# ─────────────────────────────────────────────────────────────────────────────
-def cb_lookup(uid, r_ref):
-    """Fetch from PubChem and store the result on the compound object itself.
-    A version counter is bumped so the widgets get brand-new keys and re-read value=."""
-    query = (st.session_state.get(f"cas_{uid}_{st.session_state.get(f'_ver_{uid}',0)}")
-             or st.session_state.get(f"name_{uid}_{st.session_state.get(f'_ver_{uid}',0)}")
-             or "").strip()
-    if not query:
-        return
-    data = pubchem_lookup(query)
-    if data.get("error"):
-        st.session_state[f"_msg_{uid}"] = ("error", data["error"])
-        return
-    r_ref["name"] = data.get("name") or r_ref.get("name", "")
-    r_ref["formula"] = data.get("formula") or r_ref.get("formula", "")
-    r_ref["mw"] = float(data["mw"]) if data.get("mw") else r_ref.get("mw")
-    r_ref["density"] = float(data["density"]) if data.get("density") else r_ref.get("density")
-    r_ref["smiles"] = data.get("smiles") or r_ref.get("smiles", "")
-    r_ref["cid"] = data.get("cid")
-    # bump version -> widgets get new keys -> they adopt the new value= on next render
-    st.session_state[f"_ver_{uid}"] = st.session_state.get(f"_ver_{uid}", 0) + 1
-    st.session_state[f"_msg_{uid}"] = (
-        "ok", f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
-
-
-def cb_relink(uid, changed):
-    """Recompute linked quantities and bump version so quantity widgets refresh."""
-    ver = st.session_state.get(f"_ver_{uid}", 0)
-    mw = st.session_state.get(f"mw_{uid}_{ver}")
-    if not mw:
-        return
-    mass = st.session_state.get(f"mass_{uid}_{ver}") or None
-    vol = st.session_state.get(f"vol_{uid}_{ver}") or None
-    mmol = st.session_state.get(f"mmol_{uid}_{ver}") or None
-    dens = st.session_state.get(f"dens_{uid}_{ver}") or None
-    pur = st.session_state.get(f"pur_{uid}_{ver}", 100.0)
-    lm, lv, lmol = link_quantities(mw, mass, vol, mmol, dens, pur, changed)
-    st.session_state[f"_qty_{uid}"] = {
-        "mass": float(lm) if lm else 0.0,
-        "vol": float(lv) if lv else 0.0,
-        "mmol": float(lmol) if lmol else 0.0,
-    }
-    st.session_state[f"_ver_{uid}"] = ver + 1
 
 
 def _pubchem_density(cid: int) -> Optional[float]:
@@ -327,9 +253,6 @@ class Compound:
     density: Optional[float] = None
     purity: float = 100.0
     role: str = "reagent"
-    cid: Optional[int] = None  # PubChem CID (for structure image)
-    # unique, stable id used for widget keys (never changes for the life of the object)
-    uid: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     # biocatalyst
     cat_type: str = "chemical"
     enzyme_name: str = ""
@@ -659,13 +582,6 @@ def build_docx(meta, res, df):
 st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 
 # ── Session state init ───────────────────────────────────────────────────────
-# Bump this when the Compound dataclass gains new fields, to flush stale objects
-# left in session_state from an older version of the app.
-SCHEMA_VERSION = 9
-if st.session_state.get("_schema") != SCHEMA_VERSION:
-    st.session_state.clear()
-    st.session_state["_schema"] = SCHEMA_VERSION
-
 if "reagents" not in st.session_state:
     st.session_state.reagents = default_reagents()
 if "pumps" not in st.session_state:
@@ -725,11 +641,9 @@ with tab_setup:
         ordered = [r for r in st.session_state.reagents if r.role != "product"] + \
                   [r for r in st.session_state.reagents if r.role == "product"]
 
-        for r in ordered:
+        for idx, r in enumerate(ordered):
             real_idx = st.session_state.reagents.index(r)
-            uid = r.uid
             color = ROLE_COLORS[r.role]
-
             with st.container(border=True):
                 head = st.columns([2, 3, 1])
                 head[0].markdown(
@@ -773,9 +687,20 @@ with tab_setup:
                         if data.get("error"):
                             st.warning(f"Lookup failed: {data['error']}")
                         else:
-                            # stash result; it is applied at the top of the next run,
-                            # before any widget with these keys is instantiated.
-                            st.session_state[f"_pending_lookup_{real_idx}"] = data
+                            # Write into the object AND into the widget keys, then rerun,
+                            # so the inputs reflect the fetched values on redraw.
+                            if data.get("formula"):
+                                r.formula = data["formula"]
+                                st.session_state[f"form_{real_idx}"] = data["formula"]
+                            if data.get("mw"):
+                                r.mw = data["mw"]
+                                st.session_state[f"mw_{real_idx}"] = float(data["mw"])
+                            if data.get("density"):
+                                r.density = data["density"]
+                                st.session_state[f"dens_{real_idx}"] = float(data["density"])
+                            if data.get("smiles"):
+                                r.smiles = data["smiles"]
+                                st.session_state[f"smi_{real_idx}"] = data["smiles"]
                             st.session_state[f"_lookup_ok_{real_idx}"] = (
                                 f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
                             st.rerun()
@@ -793,32 +718,6 @@ with tab_setup:
                     r.mw = mw_val or parsed or None
                     r.smiles = c2[1].text_input("SMILES", r.smiles, key=f"smi_{real_idx}")
 
-                    # Structure preview (PubChem PNG)
-                    if getattr(r, "cid", None):
-                        st.image(pubchem_image_url(r.cid), width=160,
-                                 caption=f"CID {r.cid}")
-
-                    # ── Product: live theoretical yield from limiting reagent ──
-                    if r.role == "product":
-                        _reagent_pool = [x for x in st.session_state.reagents
-                                         if x.role == "reagent" and x.mmol]
-                        _lim = next((x for x in _reagent_pool if x.is_limiting), None)
-                        if _lim is None and _reagent_pool:
-                            _lim = min(_reagent_pool, key=lambda x: x.mmol)
-                        if _lim and r.mw:
-                            ty_g = _lim.mmol * r.mw / 1000       # theoretical mass (g)
-                            st.info(
-                                f"**Expected mass (theoretical yield):** {ty_g:.4f} g "
-                                f"({_lim.mmol:.4f} mmol)  \n"
-                                f"Based on limiting reagent "
-                                f"**{_lim.name or _lim.formula or 'reagent'}** "
-                                f"× MW(product) {r.mw:g}"
-                            )
-                        elif r.mw and not _lim:
-                            st.caption("💡 Set a limiting reagent with amount to compute expected mass.")
-                        elif not r.mw:
-                            st.caption("💡 Enter the product MW to compute expected mass.")
-
                     if r.role != "product":
                         st.caption("Quantities — auto-linked (enter MW first)")
                         q = st.columns(5)
@@ -833,7 +732,7 @@ with tab_setup:
                         r.purity = q[4].number_input("Purity (%)", value=r.purity, min_value=0.0,
                                                      max_value=100.0, key=f"pur_{real_idx}")
 
-                        # detect which field the user changed, relink, write back to keys, rerun
+                        # detect which field changed and relink
                         changed = None
                         if new_mass != r.mass:
                             changed = "mass"
@@ -841,17 +740,10 @@ with tab_setup:
                             changed = "volume"
                         elif new_mmol != r.mmol:
                             changed = "mmol"
-
-                        if changed and r.mw:
-                            lm, lv, lmol = link_quantities(
-                                r.mw, new_mass, new_vol, new_mmol, r.density, r.purity, changed)
-                            r.mass, r.volume, r.mmol = lm, lv, lmol
-                            # stash and rerun; applied at top of next run before widgets
-                            st.session_state[f"_pending_qty_{real_idx}"] = {
-                                "mass": lm, "volume": lv, "mmol": lmol}
-                            st.rerun()
-                        else:
-                            r.mass, r.volume, r.mmol = new_mass, new_vol, new_mmol
+                        r.mass, r.volume, r.mmol = new_mass, new_vol, new_mmol
+                        if changed:
+                            r.mass, r.volume, r.mmol = link_quantities(
+                                r.mw, r.mass, r.volume, r.mmol, r.density, r.purity, changed)
 
                         if r.role == "reagent":
                             r.is_limiting = st.checkbox("★ Limiting reagent", value=r.is_limiting,
@@ -888,24 +780,6 @@ with tab_setup:
             st.rerun()
 
         for idx, p in enumerate(st.session_state.pumps):
-            # Apply pending lookup before widgets
-            pend = f"_pending_plookup_{idx}"
-            if st.session_state.get(pend):
-                d = st.session_state.pop(pend)
-                if d.get("name"):
-                    p.name = d["name"]
-                if d.get("formula"):
-                    p.formula = d["formula"]
-                if d.get("mw"):
-                    p.mw = d["mw"]
-                if d.get("density"):
-                    p.density = d["density"]
-                if d.get("smiles"):
-                    p.smiles = d["smiles"]
-                p.cid = d.get("cid")
-                for wk in ("pname", "pcas", "pform", "pmw", "pdens"):
-                    st.session_state.pop(f"{wk}_{idx}", None)
-
             with st.container(border=True):
                 head = st.columns([1, 2, 2, 1])
                 head[0].markdown(f"**P{str(idx+1).zfill(2)}**")
@@ -939,7 +813,15 @@ with tab_setup:
                         if data.get("error"):
                             st.warning(f"Lookup failed: {data['error']}")
                         else:
-                            st.session_state[f"_pending_plookup_{idx}"] = data
+                            if data.get("formula"):
+                                p.formula = data["formula"]
+                                st.session_state[f"pform_{idx}"] = data["formula"]
+                            if data.get("mw"):
+                                p.mw = data["mw"]
+                                st.session_state[f"pmw_{idx}"] = float(data["mw"])
+                            if data.get("density"):
+                                p.density = data["density"]
+                                st.session_state[f"pdens_{idx}"] = float(data["density"])
                             st.session_state[f"_plookup_ok_{idx}"] = (
                                 f"✔ {data.get('formula')} · MW {data.get('mw')}")
                             st.rerun()
@@ -952,8 +834,6 @@ with tab_setup:
                     parsed = parse_mw(p.formula)
                     p.mw = st.number_input("MW (g/mol)", value=float(p.mw) if p.mw else (parsed or 0.0),
                                            min_value=0.0, key=f"pmw_{idx}") or parsed or None
-                    if getattr(p, "cid", None):
-                        st.image(pubchem_image_url(p.cid), width=140, caption=f"CID {p.cid}")
                     q = st.columns(4)
                     p.mass = q[0].number_input("Mass (g)", value=p.mass or 0.0, min_value=0.0, key=f"pmass_{idx}") or None
                     p.mmol = q[1].number_input("mmol", value=p.mmol or 0.0, min_value=0.0, key=f"pmmol_{idx}") or None
@@ -962,54 +842,14 @@ with tab_setup:
 
         # flow product
         st.markdown("#### Product")
-        fp = st.session_state.flow_product
-        # apply pending lookup before widgets
-        if st.session_state.get("_pending_fp"):
-            d = st.session_state.pop("_pending_fp")
-            if d.get("name"):
-                fp.name = d["name"]
-            if d.get("formula"):
-                fp.formula = d["formula"]
-            if d.get("mw"):
-                fp.mw = d["mw"]
-            fp.smiles = d.get("smiles") or fp.smiles
-            fp.cid = d.get("cid")
-            for wk in ("fp_name", "fp_cas", "fp_form", "fp_mw"):
-                st.session_state.pop(wk, None)
         with st.container(border=True):
-            c = st.columns([2, 2, 1])
+            fp = st.session_state.flow_product
+            c = st.columns(4)
             fp.name = c[0].text_input("Product name", fp.name, key="fp_name")
-            fp.cas = c[1].text_input("CAS / name", fp.cas, key="fp_cas")
-            if c[2].button("🔍 Lookup", key="fp_lk", use_container_width=True):
-                with st.spinner("Searching PubChem…"):
-                    data = pubchem_lookup(fp.cas or fp.name)
-                if data.get("error"):
-                    st.warning(f"Lookup failed: {data['error']}")
-                else:
-                    st.session_state["_pending_fp"] = data
-                    st.session_state["_fp_ok"] = f"✔ {data.get('formula')} · MW {data.get('mw')}"
-                    st.rerun()
-            if st.session_state.get("_fp_ok"):
-                st.success(st.session_state.pop("_fp_ok"))
-
-            c2 = st.columns(2)
-            fp.formula = c2[0].text_input("Formula", fp.formula, key="fp_form")
-            fp.mw = c2[1].number_input("MW (g/mol)",
-                                       value=float(fp.mw) if fp.mw else (parse_mw(fp.formula) or 0.0),
-                                       min_value=0.0, key="fp_mw") or None
-            if getattr(fp, "cid", None):
-                st.image(pubchem_image_url(fp.cid), width=140, caption=f"CID {fp.cid}")
-
-            # Expected mass from limiting pump
-            _pump_pool = [p for p in st.session_state.pumps if p.role == "reagent" and p.mmol]
-            _limp = next((p for p in _pump_pool if p.is_limiting), None)
-            if _limp is None and _pump_pool:
-                _limp = min(_pump_pool, key=lambda p: p.mmol)
-            if _limp and fp.mw:
-                ty_g = _limp.mmol * fp.mw / 1000
-                st.info(f"**Expected mass (theoretical yield):** {ty_g:.4f} g "
-                        f"({_limp.mmol:.4f} mmol) — from limiting pump "
-                        f"**{_limp.name or _limp.formula or 'reagent'}**")
+            fp.cas = c[1].text_input("CAS", fp.cas, key="fp_cas")
+            fp.formula = c[2].text_input("Formula", fp.formula, key="fp_form")
+            fp.mw = c[3].number_input("MW (g/mol)", value=float(fp.mw) if fp.mw else (parse_mw(fp.formula) or 0.0),
+                                      min_value=0.0, key="fp_mw") or None
 
         st.markdown("#### Reaction conditions (flow)")
         with st.container(border=True):
