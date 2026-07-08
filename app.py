@@ -606,6 +606,13 @@ def build_docx(meta, res, df):
 st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 
 # ── Session state init ───────────────────────────────────────────────────────
+# Bump this when the Compound dataclass gains new fields, to flush stale objects
+# left in session_state from an older version of the app.
+SCHEMA_VERSION = 2
+if st.session_state.get("_schema") != SCHEMA_VERSION:
+    st.session_state.clear()
+    st.session_state["_schema"] = SCHEMA_VERSION
+
 if "reagents" not in st.session_state:
     st.session_state.reagents = default_reagents()
 if "pumps" not in st.session_state:
@@ -747,7 +754,7 @@ with tab_setup:
                     r.smiles = c2[1].text_input("SMILES", r.smiles, key=f"smi_{real_idx}")
 
                     # Structure preview (PubChem PNG)
-                    if r.cid:
+                    if getattr(r, "cid", None):
                         st.image(pubchem_image_url(r.cid), width=160,
                                  caption=f"CID {r.cid}")
 
@@ -902,7 +909,7 @@ with tab_setup:
                     parsed = parse_mw(p.formula)
                     p.mw = st.number_input("MW (g/mol)", value=float(p.mw) if p.mw else (parsed or 0.0),
                                            min_value=0.0, key=f"pmw_{idx}") or parsed or None
-                    if p.cid:
+                    if getattr(p, "cid", None):
                         st.image(pubchem_image_url(p.cid), width=140, caption=f"CID {p.cid}")
                     q = st.columns(4)
                     p.mass = q[0].number_input("Mass (g)", value=p.mass or 0.0, min_value=0.0, key=f"pmass_{idx}") or None
@@ -944,7 +951,7 @@ with tab_setup:
             fp.mw = c2[1].number_input("MW (g/mol)",
                                        value=float(fp.mw) if fp.mw else (parse_mw(fp.formula) or 0.0),
                                        min_value=0.0, key="fp_mw") or None
-            if fp.cid:
+            if getattr(fp, "cid", None):
                 st.image(pubchem_image_url(fp.cid), width=140, caption=f"CID {fp.cid}")
 
             # Expected mass from limiting pump
