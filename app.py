@@ -655,7 +655,7 @@ st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 # ── Session state init ───────────────────────────────────────────────────────
 # Bump this when the Compound dataclass gains new fields, to flush stale objects
 # left in session_state from an older version of the app.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 if st.session_state.get("_schema") != SCHEMA_VERSION:
     st.session_state.clear()
     st.session_state["_schema"] = SCHEMA_VERSION
