@@ -184,7 +184,7 @@ PUGREST = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 
 @st.cache_data(show_spinner=False, ttl=86400)
 def pubchem_lookup(query: str) -> dict:
-    """Look up a compound by CAS or name. Returns {formula, mw, density, cid, iupac, error?}."""
+    """Look up a compound by CAS or name. Returns {name, formula, mw, density, smiles, cid, error?}."""
     query = query.strip()
     if not query:
         return {"error": "empty query"}
@@ -204,8 +204,10 @@ def pubchem_lookup(query: str) -> dict:
         pdata = p.json()["PropertyTable"]["Properties"][0]
 
         density = _pubchem_density(cid)
+        common = _pubchem_common_name(cid)
         return {
             "cid": cid,
+            "name": common or pdata.get("IUPACName") or query,
             "formula": pdata.get("MolecularFormula"),
             "mw": float(pdata["MolecularWeight"]) if pdata.get("MolecularWeight") else None,
             "smiles": pdata.get("CanonicalSMILES"),
@@ -216,6 +218,27 @@ def pubchem_lookup(query: str) -> dict:
         return {"error": f"Network error: {e}"}
     except (KeyError, ValueError, IndexError) as e:
         return {"error": f"Parse error: {e}"}
+
+
+def _pubchem_common_name(cid: int) -> Optional[str]:
+    """Fetch the preferred common/synonym name for a CID (first synonym is usually the common name)."""
+    try:
+        r = requests.get(f"{PUGREST}/compound/cid/{cid}/synonyms/JSON", timeout=12)
+        if r.status_code != 200:
+            return None
+        syns = r.json()["InformationList"]["Information"][0].get("Synonym", [])
+        # PubChem lists the most common name first; skip pure CAS-number entries
+        for s in syns:
+            if not s.replace("-", "").isdigit():  # skip CAS-like "67-64-1"
+                return s
+        return syns[0] if syns else None
+    except (requests.RequestException, KeyError, IndexError):
+        return None
+
+
+def pubchem_image_url(cid: int, size: int = 200) -> str:
+    """Return a PubChem 2D structure image URL for a given CID."""
+    return f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/PNG?image_size={size}x{size}"
 
 
 def _pubchem_density(cid: int) -> Optional[float]:
@@ -253,6 +276,7 @@ class Compound:
     density: Optional[float] = None
     purity: float = 100.0
     role: str = "reagent"
+    cid: Optional[int] = None  # PubChem CID (for structure image)
     # biocatalyst
     cat_type: str = "chemical"
     enzyme_name: str = ""
@@ -689,6 +713,9 @@ with tab_setup:
                         else:
                             # Write into the object AND into the widget keys, then rerun,
                             # so the inputs reflect the fetched values on redraw.
+                            if data.get("name"):
+                                r.name = data["name"]
+                                st.session_state[f"name_{real_idx}"] = data["name"]
                             if data.get("formula"):
                                 r.formula = data["formula"]
                                 st.session_state[f"form_{real_idx}"] = data["formula"]
@@ -701,6 +728,7 @@ with tab_setup:
                             if data.get("smiles"):
                                 r.smiles = data["smiles"]
                                 st.session_state[f"smi_{real_idx}"] = data["smiles"]
+                            r.cid = data.get("cid")
                             st.session_state[f"_lookup_ok_{real_idx}"] = (
                                 f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
                             st.rerun()
@@ -718,6 +746,32 @@ with tab_setup:
                     r.mw = mw_val or parsed or None
                     r.smiles = c2[1].text_input("SMILES", r.smiles, key=f"smi_{real_idx}")
 
+                    # Structure preview (PubChem PNG)
+                    if r.cid:
+                        st.image(pubchem_image_url(r.cid), width=160,
+                                 caption=f"CID {r.cid}")
+
+                    # ── Product: live theoretical yield from limiting reagent ──
+                    if r.role == "product":
+                        _reagent_pool = [x for x in st.session_state.reagents
+                                         if x.role == "reagent" and x.mmol]
+                        _lim = next((x for x in _reagent_pool if x.is_limiting), None)
+                        if _lim is None and _reagent_pool:
+                            _lim = min(_reagent_pool, key=lambda x: x.mmol)
+                        if _lim and r.mw:
+                            ty_g = _lim.mmol * r.mw / 1000       # theoretical mass (g)
+                            st.info(
+                                f"**Expected mass (theoretical yield):** {ty_g:.4f} g "
+                                f"({_lim.mmol:.4f} mmol)  \n"
+                                f"Based on limiting reagent "
+                                f"**{_lim.name or _lim.formula or 'reagent'}** "
+                                f"× MW(product) {r.mw:g}"
+                            )
+                        elif r.mw and not _lim:
+                            st.caption("💡 Set a limiting reagent with amount to compute expected mass.")
+                        elif not r.mw:
+                            st.caption("💡 Enter the product MW to compute expected mass.")
+
                     if r.role != "product":
                         st.caption("Quantities — auto-linked (enter MW first)")
                         q = st.columns(5)
@@ -732,7 +786,7 @@ with tab_setup:
                         r.purity = q[4].number_input("Purity (%)", value=r.purity, min_value=0.0,
                                                      max_value=100.0, key=f"pur_{real_idx}")
 
-                        # detect which field changed and relink
+                        # detect which field the user changed, relink, write back to keys, rerun
                         changed = None
                         if new_mass != r.mass:
                             changed = "mass"
@@ -740,10 +794,18 @@ with tab_setup:
                             changed = "volume"
                         elif new_mmol != r.mmol:
                             changed = "mmol"
-                        r.mass, r.volume, r.mmol = new_mass, new_vol, new_mmol
-                        if changed:
-                            r.mass, r.volume, r.mmol = link_quantities(
-                                r.mw, r.mass, r.volume, r.mmol, r.density, r.purity, changed)
+
+                        if changed and r.mw:
+                            lm, lv, lmol = link_quantities(
+                                r.mw, new_mass, new_vol, new_mmol, r.density, r.purity, changed)
+                            r.mass, r.volume, r.mmol = lm, lv, lmol
+                            # push recomputed values into the widget keys so they display
+                            st.session_state[f"mass_{real_idx}"] = float(lm) if lm else 0.0
+                            st.session_state[f"vol_{real_idx}"] = float(lv) if lv else 0.0
+                            st.session_state[f"mmol_{real_idx}"] = float(lmol) if lmol else 0.0
+                            st.rerun()
+                        else:
+                            r.mass, r.volume, r.mmol = new_mass, new_vol, new_mmol
 
                         if r.role == "reagent":
                             r.is_limiting = st.checkbox("★ Limiting reagent", value=r.is_limiting,
@@ -813,6 +875,9 @@ with tab_setup:
                         if data.get("error"):
                             st.warning(f"Lookup failed: {data['error']}")
                         else:
+                            if data.get("name"):
+                                p.name = data["name"]
+                                st.session_state[f"pname_{idx}"] = data["name"]
                             if data.get("formula"):
                                 p.formula = data["formula"]
                                 st.session_state[f"pform_{idx}"] = data["formula"]
@@ -822,6 +887,9 @@ with tab_setup:
                             if data.get("density"):
                                 p.density = data["density"]
                                 st.session_state[f"pdens_{idx}"] = float(data["density"])
+                            if data.get("smiles"):
+                                p.smiles = data["smiles"]
+                            p.cid = data.get("cid")
                             st.session_state[f"_plookup_ok_{idx}"] = (
                                 f"✔ {data.get('formula')} · MW {data.get('mw')}")
                             st.rerun()
@@ -834,6 +902,8 @@ with tab_setup:
                     parsed = parse_mw(p.formula)
                     p.mw = st.number_input("MW (g/mol)", value=float(p.mw) if p.mw else (parsed or 0.0),
                                            min_value=0.0, key=f"pmw_{idx}") or parsed or None
+                    if p.cid:
+                        st.image(pubchem_image_url(p.cid), width=140, caption=f"CID {p.cid}")
                     q = st.columns(4)
                     p.mass = q[0].number_input("Mass (g)", value=p.mass or 0.0, min_value=0.0, key=f"pmass_{idx}") or None
                     p.mmol = q[1].number_input("mmol", value=p.mmol or 0.0, min_value=0.0, key=f"pmmol_{idx}") or None
@@ -844,12 +914,49 @@ with tab_setup:
         st.markdown("#### Product")
         with st.container(border=True):
             fp = st.session_state.flow_product
-            c = st.columns(4)
+            c = st.columns([2, 2, 1])
             fp.name = c[0].text_input("Product name", fp.name, key="fp_name")
-            fp.cas = c[1].text_input("CAS", fp.cas, key="fp_cas")
-            fp.formula = c[2].text_input("Formula", fp.formula, key="fp_form")
-            fp.mw = c[3].number_input("MW (g/mol)", value=float(fp.mw) if fp.mw else (parse_mw(fp.formula) or 0.0),
-                                      min_value=0.0, key="fp_mw") or None
+            fp.cas = c[1].text_input("CAS / name", fp.cas, key="fp_cas")
+            if c[2].button("🔍 Lookup", key="fp_lk", use_container_width=True):
+                with st.spinner("Searching PubChem…"):
+                    data = pubchem_lookup(fp.cas or fp.name)
+                if data.get("error"):
+                    st.warning(f"Lookup failed: {data['error']}")
+                else:
+                    if data.get("name"):
+                        fp.name = data["name"]
+                        st.session_state["fp_name"] = data["name"]
+                    if data.get("formula"):
+                        fp.formula = data["formula"]
+                        st.session_state["fp_form"] = data["formula"]
+                    if data.get("mw"):
+                        fp.mw = data["mw"]
+                        st.session_state["fp_mw"] = float(data["mw"])
+                    fp.smiles = data.get("smiles") or fp.smiles
+                    fp.cid = data.get("cid")
+                    st.session_state["_fp_ok"] = f"✔ {data.get('formula')} · MW {data.get('mw')}"
+                    st.rerun()
+            if st.session_state.get("_fp_ok"):
+                st.success(st.session_state.pop("_fp_ok"))
+
+            c2 = st.columns(2)
+            fp.formula = c2[0].text_input("Formula", fp.formula, key="fp_form")
+            fp.mw = c2[1].number_input("MW (g/mol)",
+                                       value=float(fp.mw) if fp.mw else (parse_mw(fp.formula) or 0.0),
+                                       min_value=0.0, key="fp_mw") or None
+            if fp.cid:
+                st.image(pubchem_image_url(fp.cid), width=140, caption=f"CID {fp.cid}")
+
+            # Expected mass from limiting pump
+            _pump_pool = [p for p in st.session_state.pumps if p.role == "reagent" and p.mmol]
+            _limp = next((p for p in _pump_pool if p.is_limiting), None)
+            if _limp is None and _pump_pool:
+                _limp = min(_pump_pool, key=lambda p: p.mmol)
+            if _limp and fp.mw:
+                ty_g = _limp.mmol * fp.mw / 1000
+                st.info(f"**Expected mass (theoretical yield):** {ty_g:.4f} g "
+                        f"({_limp.mmol:.4f} mmol) — from limiting pump "
+                        f"**{_limp.name or _limp.formula or 'reagent'}**")
 
         st.markdown("#### Reaction conditions (flow)")
         with st.container(border=True):
