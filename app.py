@@ -243,9 +243,17 @@ def pubchem_image_url(cid: int, size: int = 200) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Streamlit callbacks — run BEFORE the script re-executes, so they can freely
-# write to widget keys (this is the reliable way to populate fields).
+# Streamlit key helpers — Streamlit >=1.50 ignores `value=` on widgets that have
+# a key after first render. The reliable pattern is: seed the key ONCE, never pass
+# `value=`, and let session_state be the single source of truth. Callbacks then
+# write straight into these keys.
 # ─────────────────────────────────────────────────────────────────────────────
+def seed(key, val):
+    """Initialise a widget key exactly once (before the widget is created)."""
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+
 def cb_lookup(uid, k_name, k_cas, k_form, k_mw, k_dens, k_smi, k_cid):
     """Fetch from PubChem and write results directly into the widget keys."""
     query = (st.session_state.get(k_cas) or st.session_state.get(k_name) or "").strip()
@@ -655,7 +663,7 @@ st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 # ── Session state init ───────────────────────────────────────────────────────
 # Bump this when the Compound dataclass gains new fields, to flush stale objects
 # left in session_state from an older version of the app.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 if st.session_state.get("_schema") != SCHEMA_VERSION:
     st.session_state.clear()
     st.session_state["_schema"] = SCHEMA_VERSION
