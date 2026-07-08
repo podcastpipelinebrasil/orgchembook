@@ -611,7 +611,7 @@ st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 # ── Session state init ───────────────────────────────────────────────────────
 # Bump this when the Compound dataclass gains new fields, to flush stale objects
 # left in session_state from an older version of the app.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 if st.session_state.get("_schema") != SCHEMA_VERSION:
     st.session_state.clear()
     st.session_state["_schema"] = SCHEMA_VERSION
@@ -680,33 +680,37 @@ with tab_setup:
             uid = r.uid
             color = ROLE_COLORS[r.role]
 
-            # Apply any pending lookup result BEFORE widgets are drawn, then clear the
-            # widget keys so text_input/number_input pick up the new object values.
+            # Apply any pending lookup result BEFORE widgets are drawn. Writing to a
+            # widget key here (before the widget exists this run) is allowed and makes
+            # the widget adopt the value on creation.
             pend_key = f"_pending_lookup_{uid}"
             if st.session_state.get(pend_key):
                 d = st.session_state.pop(pend_key)
                 if d.get("name"):
                     r.name = d["name"]
+                    st.session_state[f"name_{uid}"] = d["name"]
                 if d.get("formula"):
                     r.formula = d["formula"]
+                    st.session_state[f"form_{uid}"] = d["formula"]
                 if d.get("mw"):
                     r.mw = float(d["mw"])
+                    st.session_state[f"mw_{uid}"] = float(d["mw"])
                 if d.get("density"):
                     r.density = float(d["density"])
+                    st.session_state[f"dens_{uid}"] = float(d["density"])
                 if d.get("smiles"):
                     r.smiles = d["smiles"]
+                    st.session_state[f"smi_{uid}"] = d["smiles"]
                 r.cid = d.get("cid")
-                # remove stale widget keys so the widgets re-read from the object
-                for wk in ("name", "cas", "form", "mw", "dens", "smi"):
-                    st.session_state.pop(f"{wk}_{uid}", None)
 
             # Apply any pending quantity relink (mass<->volume<->mmol) before widgets.
             pend_q = f"_pending_qty_{uid}"
             if st.session_state.get(pend_q):
                 q = st.session_state.pop(pend_q)
                 r.mass, r.volume, r.mmol = q["mass"], q["volume"], q["mmol"]
-                for wk in ("mass", "vol", "mmol"):
-                    st.session_state.pop(f"{wk}_{uid}", None)
+                st.session_state[f"mass_{uid}"] = float(q["mass"]) if q["mass"] else 0.0
+                st.session_state[f"vol_{uid}"] = float(q["volume"]) if q["volume"] else 0.0
+                st.session_state[f"mmol_{uid}"] = float(q["mmol"]) if q["mmol"] else 0.0
 
             with st.container(border=True):
                 head = st.columns([2, 3, 1])
