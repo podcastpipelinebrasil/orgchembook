@@ -32,6 +32,7 @@ Notes
 import io
 import json
 import math
+import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -277,6 +278,8 @@ class Compound:
     purity: float = 100.0
     role: str = "reagent"
     cid: Optional[int] = None  # PubChem CID (for structure image)
+    # unique, stable id used for widget keys (never changes for the life of the object)
+    uid: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     # biocatalyst
     cat_type: str = "chemical"
     enzyme_name: str = ""
@@ -608,7 +611,7 @@ st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 # ── Session state init ───────────────────────────────────────────────────────
 # Bump this when the Compound dataclass gains new fields, to flush stale objects
 # left in session_state from an older version of the app.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 if st.session_state.get("_schema") != SCHEMA_VERSION:
     st.session_state.clear()
     st.session_state["_schema"] = SCHEMA_VERSION
@@ -672,13 +675,14 @@ with tab_setup:
         ordered = [r for r in st.session_state.reagents if r.role != "product"] + \
                   [r for r in st.session_state.reagents if r.role == "product"]
 
-        for idx, r in enumerate(ordered):
+        for r in ordered:
             real_idx = st.session_state.reagents.index(r)
+            uid = r.uid
             color = ROLE_COLORS[r.role]
 
             # Apply any pending lookup result BEFORE widgets are drawn, then clear the
             # widget keys so text_input/number_input pick up the new object values.
-            pend_key = f"_pending_lookup_{real_idx}"
+            pend_key = f"_pending_lookup_{uid}"
             if st.session_state.get(pend_key):
                 d = st.session_state.pop(pend_key)
                 if d.get("name"):
@@ -686,23 +690,23 @@ with tab_setup:
                 if d.get("formula"):
                     r.formula = d["formula"]
                 if d.get("mw"):
-                    r.mw = d["mw"]
+                    r.mw = float(d["mw"])
                 if d.get("density"):
-                    r.density = d["density"]
+                    r.density = float(d["density"])
                 if d.get("smiles"):
                     r.smiles = d["smiles"]
                 r.cid = d.get("cid")
                 # remove stale widget keys so the widgets re-read from the object
                 for wk in ("name", "cas", "form", "mw", "dens", "smi"):
-                    st.session_state.pop(f"{wk}_{real_idx}", None)
+                    st.session_state.pop(f"{wk}_{uid}", None)
 
             # Apply any pending quantity relink (mass<->volume<->mmol) before widgets.
-            pend_q = f"_pending_qty_{real_idx}"
+            pend_q = f"_pending_qty_{uid}"
             if st.session_state.get(pend_q):
                 q = st.session_state.pop(pend_q)
                 r.mass, r.volume, r.mmol = q["mass"], q["volume"], q["mmol"]
                 for wk in ("mass", "vol", "mmol"):
-                    st.session_state.pop(f"{wk}_{real_idx}", None)
+                    st.session_state.pop(f"{wk}_{uid}", None)
 
             with st.container(border=True):
                 head = st.columns([2, 3, 1])
