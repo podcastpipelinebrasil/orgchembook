@@ -608,7 +608,7 @@ st.set_page_config(page_title="OrgChemBook", page_icon="⚗️", layout="wide")
 # ── Session state init ───────────────────────────────────────────────────────
 # Bump this when the Compound dataclass gains new fields, to flush stale objects
 # left in session_state from an older version of the app.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 if st.session_state.get("_schema") != SCHEMA_VERSION:
     st.session_state.clear()
     st.session_state["_schema"] = SCHEMA_VERSION
@@ -675,6 +675,35 @@ with tab_setup:
         for idx, r in enumerate(ordered):
             real_idx = st.session_state.reagents.index(r)
             color = ROLE_COLORS[r.role]
+
+            # Apply any pending lookup result BEFORE widgets are drawn, then clear the
+            # widget keys so text_input/number_input pick up the new object values.
+            pend_key = f"_pending_lookup_{real_idx}"
+            if st.session_state.get(pend_key):
+                d = st.session_state.pop(pend_key)
+                if d.get("name"):
+                    r.name = d["name"]
+                if d.get("formula"):
+                    r.formula = d["formula"]
+                if d.get("mw"):
+                    r.mw = d["mw"]
+                if d.get("density"):
+                    r.density = d["density"]
+                if d.get("smiles"):
+                    r.smiles = d["smiles"]
+                r.cid = d.get("cid")
+                # remove stale widget keys so the widgets re-read from the object
+                for wk in ("name", "cas", "form", "mw", "dens", "smi"):
+                    st.session_state.pop(f"{wk}_{real_idx}", None)
+
+            # Apply any pending quantity relink (mass<->volume<->mmol) before widgets.
+            pend_q = f"_pending_qty_{real_idx}"
+            if st.session_state.get(pend_q):
+                q = st.session_state.pop(pend_q)
+                r.mass, r.volume, r.mmol = q["mass"], q["volume"], q["mmol"]
+                for wk in ("mass", "vol", "mmol"):
+                    st.session_state.pop(f"{wk}_{real_idx}", None)
+
             with st.container(border=True):
                 head = st.columns([2, 3, 1])
                 head[0].markdown(
@@ -718,24 +747,9 @@ with tab_setup:
                         if data.get("error"):
                             st.warning(f"Lookup failed: {data['error']}")
                         else:
-                            # Write into the object AND into the widget keys, then rerun,
-                            # so the inputs reflect the fetched values on redraw.
-                            if data.get("name"):
-                                r.name = data["name"]
-                                st.session_state[f"name_{real_idx}"] = data["name"]
-                            if data.get("formula"):
-                                r.formula = data["formula"]
-                                st.session_state[f"form_{real_idx}"] = data["formula"]
-                            if data.get("mw"):
-                                r.mw = data["mw"]
-                                st.session_state[f"mw_{real_idx}"] = float(data["mw"])
-                            if data.get("density"):
-                                r.density = data["density"]
-                                st.session_state[f"dens_{real_idx}"] = float(data["density"])
-                            if data.get("smiles"):
-                                r.smiles = data["smiles"]
-                                st.session_state[f"smi_{real_idx}"] = data["smiles"]
-                            r.cid = data.get("cid")
+                            # stash result; it is applied at the top of the next run,
+                            # before any widget with these keys is instantiated.
+                            st.session_state[f"_pending_lookup_{real_idx}"] = data
                             st.session_state[f"_lookup_ok_{real_idx}"] = (
                                 f"✔ CID {data['cid']} · {data.get('formula')} · MW {data.get('mw')}")
                             st.rerun()
@@ -806,10 +820,9 @@ with tab_setup:
                             lm, lv, lmol = link_quantities(
                                 r.mw, new_mass, new_vol, new_mmol, r.density, r.purity, changed)
                             r.mass, r.volume, r.mmol = lm, lv, lmol
-                            # push recomputed values into the widget keys so they display
-                            st.session_state[f"mass_{real_idx}"] = float(lm) if lm else 0.0
-                            st.session_state[f"vol_{real_idx}"] = float(lv) if lv else 0.0
-                            st.session_state[f"mmol_{real_idx}"] = float(lmol) if lmol else 0.0
+                            # stash and rerun; applied at top of next run before widgets
+                            st.session_state[f"_pending_qty_{real_idx}"] = {
+                                "mass": lm, "volume": lv, "mmol": lmol}
                             st.rerun()
                         else:
                             r.mass, r.volume, r.mmol = new_mass, new_vol, new_mmol
@@ -849,6 +862,24 @@ with tab_setup:
             st.rerun()
 
         for idx, p in enumerate(st.session_state.pumps):
+            # Apply pending lookup before widgets
+            pend = f"_pending_plookup_{idx}"
+            if st.session_state.get(pend):
+                d = st.session_state.pop(pend)
+                if d.get("name"):
+                    p.name = d["name"]
+                if d.get("formula"):
+                    p.formula = d["formula"]
+                if d.get("mw"):
+                    p.mw = d["mw"]
+                if d.get("density"):
+                    p.density = d["density"]
+                if d.get("smiles"):
+                    p.smiles = d["smiles"]
+                p.cid = d.get("cid")
+                for wk in ("pname", "pcas", "pform", "pmw", "pdens"):
+                    st.session_state.pop(f"{wk}_{idx}", None)
+
             with st.container(border=True):
                 head = st.columns([1, 2, 2, 1])
                 head[0].markdown(f"**P{str(idx+1).zfill(2)}**")
@@ -882,21 +913,7 @@ with tab_setup:
                         if data.get("error"):
                             st.warning(f"Lookup failed: {data['error']}")
                         else:
-                            if data.get("name"):
-                                p.name = data["name"]
-                                st.session_state[f"pname_{idx}"] = data["name"]
-                            if data.get("formula"):
-                                p.formula = data["formula"]
-                                st.session_state[f"pform_{idx}"] = data["formula"]
-                            if data.get("mw"):
-                                p.mw = data["mw"]
-                                st.session_state[f"pmw_{idx}"] = float(data["mw"])
-                            if data.get("density"):
-                                p.density = data["density"]
-                                st.session_state[f"pdens_{idx}"] = float(data["density"])
-                            if data.get("smiles"):
-                                p.smiles = data["smiles"]
-                            p.cid = data.get("cid")
+                            st.session_state[f"_pending_plookup_{idx}"] = data
                             st.session_state[f"_plookup_ok_{idx}"] = (
                                 f"✔ {data.get('formula')} · MW {data.get('mw')}")
                             st.rerun()
@@ -919,8 +936,21 @@ with tab_setup:
 
         # flow product
         st.markdown("#### Product")
+        fp = st.session_state.flow_product
+        # apply pending lookup before widgets
+        if st.session_state.get("_pending_fp"):
+            d = st.session_state.pop("_pending_fp")
+            if d.get("name"):
+                fp.name = d["name"]
+            if d.get("formula"):
+                fp.formula = d["formula"]
+            if d.get("mw"):
+                fp.mw = d["mw"]
+            fp.smiles = d.get("smiles") or fp.smiles
+            fp.cid = d.get("cid")
+            for wk in ("fp_name", "fp_cas", "fp_form", "fp_mw"):
+                st.session_state.pop(wk, None)
         with st.container(border=True):
-            fp = st.session_state.flow_product
             c = st.columns([2, 2, 1])
             fp.name = c[0].text_input("Product name", fp.name, key="fp_name")
             fp.cas = c[1].text_input("CAS / name", fp.cas, key="fp_cas")
@@ -930,17 +960,7 @@ with tab_setup:
                 if data.get("error"):
                     st.warning(f"Lookup failed: {data['error']}")
                 else:
-                    if data.get("name"):
-                        fp.name = data["name"]
-                        st.session_state["fp_name"] = data["name"]
-                    if data.get("formula"):
-                        fp.formula = data["formula"]
-                        st.session_state["fp_form"] = data["formula"]
-                    if data.get("mw"):
-                        fp.mw = data["mw"]
-                        st.session_state["fp_mw"] = float(data["mw"])
-                    fp.smiles = data.get("smiles") or fp.smiles
-                    fp.cid = data.get("cid")
+                    st.session_state["_pending_fp"] = data
                     st.session_state["_fp_ok"] = f"✔ {data.get('formula')} · MW {data.get('mw')}"
                     st.rerun()
             if st.session_state.get("_fp_ok"):
